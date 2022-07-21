@@ -14,7 +14,7 @@ use std::{
 use cairo::{RectangleInt, Region};
 use gdk::{Cursor, CursorType, EventKey, EventMask, ScrollDirection, WindowEdge, WindowState};
 use gio::{prelude::*, Cancellable};
-use glib::{source::Priority, Continue, MainContext};
+use glib::{source::Priority, Continue, MainContext, translate::ToGlibPtr};
 use gtk::{builders::AboutDialogBuilder, prelude::*, Inhibit};
 
 use crate::{
@@ -72,6 +72,10 @@ impl<T> EventLoopWindowTarget<T> {
     let number = screen.primary_monitor();
     let handle = MonitorHandle::new(&self.display, number);
     Some(RootMonitorHandle { inner: handle })
+  }
+
+  pub fn is_wayland(&self) -> bool {
+    self.display.backend().is_wayland()
   }
 }
 
@@ -332,7 +336,7 @@ impl<T: 'static> EventLoop<T> {
               window.input_shape_combine_region(None)
             };
           }
-          WindowRequest::WireUpEvents => {
+          WindowRequest::WireUpEvents(draw_event) => {
             window.add_events(
               EventMask::POINTER_MOTION_MASK
                 | EventMask::BUTTON1_MOTION_MASK
@@ -723,6 +727,22 @@ impl<T: 'static> EventLoop<T> {
               }
               Inhibit(false)
             });
+
+            // Receive draw events of the window.
+            if draw_event {
+              let widget = window.upcast_ref::<gtk::Widget>();
+              unsafe { gtk::ffi::gtk_widget_set_double_buffered(widget.to_glib_none().0, 0); }
+              window.set_app_paintable(true);
+
+              let draw_clone = draw_tx.clone();
+              window.connect_draw(move |_, _| {
+                if let Err(e) = draw_clone.send(id) {
+                  log::warn!("Failed to send redraw event to event channel: {}", e);
+                }
+
+                Inhibit(false)
+              });
+            }
           }
           WindowRequest::Redraw => {
             if let Err(e) = draw_tx.send(id) {
